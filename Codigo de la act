@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibe Racing - Space Lo-Fi PMV</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #050713; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+    #ui {
+      position: absolute; top: 14px; left: 14px; z-index: 10;
+      color: #cfe9ff; text-shadow: 0 0 10px rgba(120, 200, 255, .35);
+      pointer-events: none;
+    }
+    #ui h1 { margin: 0 0 6px 0; font-size: 18px; letter-spacing: 0.5px; color: #bfe7ff; }
+    #ui p { margin: 4px 0; font-size: 12px; opacity: 0.95; }
+
+    #video-container {
+      position: absolute; bottom: 14px; right: 14px;
+      width: 180px; height: 135px; border: 1px solid rgba(180,230,255,.35);
+      border-radius: 12px; overflow: hidden; z-index: 10;
+      box-shadow: 0 0 20px rgba(120, 200, 255, .10);
+      transform: scaleX(-1);
+    }
+    video { width: 100%; height: 100%; object-fit: cover; }
+
+    #controls {
+      position: absolute; top: 14px; right: 14px; z-index: 20;
+      display: flex; gap: 8px;
+    }
+    button {
+      background: rgba(160, 210, 255, .12);
+      color: #d9f0ff;
+      border: 1px solid rgba(160, 210, 255, .25);
+      border-radius: 12px;
+      padding: 8px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      backdrop-filter: blur(6px);
+    }
+    button:hover { background: rgba(160, 210, 255, .18); }
+    button[disabled]{ opacity: .6; cursor: not-allowed; }
+    #btnRestart{ display:none; } /* SOLO aparece al perder */
+  </style>
+</head>
+<body>
+
+  <div id="ui">
+    <h1>VIBE RACING ✦ Space Lo-Fi</h1>
+    <p id="status">Iniciando IA…</p>
+    <p>Modo: <span id="val-mode">—</span></p>
+    <p>Head turn (x): <span id="val-turn">0.00</span></p>
+    <p>Eyes closed: <span id="val-eyes">—</span></p>
+    <p>Neutral face: <span id="val-neutral">—</span></p>
+    <p>Speed: <span id="val-speed">0.00</span></p>
+  </div>
+
+  <div id="controls">
+    <button id="btnStart">Activar cámara + IA</button>
+    <button id="btnMusic">▶ Lo-Fi</button>
+    <button id="btnRestart">↻ Reiniciar</button>
+  </div>
+
+  <div id="video-container">
+    <video id="webcam" autoplay playsinline muted></video>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { FaceLandmarker, FilesetResolver } from "vision";
+
+    // -------------------------
+    // 0) UI + Audio (Lo-Fi)
+    // -------------------------
+    const uiStatus = document.getElementById("status");
+    const uiMode = document.getElementById("val-mode");
+    const uiTurn = document.getElementById("val-turn");
+    const uiEyes = document.getElementById("val-eyes");
+    const uiNeutral = document.getElementById("val-neutral");
+    const uiSpeed = document.getElementById("val-speed");
+
+    const btnStart = document.getElementById("btnStart");
+    const btnMusic = document.getElementById("btnMusic");
+    const btnRestart = document.getElementById("btnRestart");
+
+    // Pon un archivo "lofi.mp3" junto a este index.html para que funcione en GitHub Pages.
+    const music = new Audio("./lofi.mp3");
+    music.loop = true;
+    music.volume = 0.35;
+
+    btnMusic.addEventListener("click", async () => {
+      try {
+        if (music.paused) { await music.play(); btnMusic.textContent = "⏸ Lo-Fi"; }
+        else { music.pause(); btnMusic.textContent = "▶ Lo-Fi"; }
+      } catch {
+        btnMusic.textContent = "Lo-Fi (sin archivo)";
+      }
+    });
+
+    // -------------------------
+    // 1) THREE.JS: escena space
+    // -------------------------
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x050713, 12, 75);
+
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 200);
+    camera.position.set(0, 2.4, 8);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    // Luz pastel
+    const key = new THREE.DirectionalLight(0xbfe7ff, 1.2);
+    key.position.set(4, 10, 6);
+    scene.add(key);
+
+    const fill = new THREE.AmbientLight(0x8fb6ff, 0.6);
+    scene.add(fill);
+
+    // Nave/Auto
+    const carGeo = new THREE.BoxGeometry(1.0, 0.5, 2.2);
+    const carMat = new THREE.MeshStandardMaterial({
+      color: 0xaee7ff,
+      emissive: 0x6bd6ff,
+      emissiveIntensity: 0.35,
+      metalness: 0.2,
+      roughness: 0.35
+    });
+    const car = new THREE.Mesh(carGeo, carMat);
+    car.position.set(0, 0.9, 0);
+    scene.add(car);
+
+    // Objeto guía para cámara
+    const guide = new THREE.Object3D();
+    guide.position.set(0, 0.7, 0);
+    scene.add(guide);
+
+    // Starfield (solo visual)
+    const STAR_COUNT = 2200;
+    const starGeo = new THREE.BufferGeometry();
+    const starPos = new Float32Array(STAR_COUNT * 3);
+
+    for (let i = 0; i < STAR_COUNT; i++) {
+      const ix = i * 3;
+      starPos[ix + 0] = (Math.random() - 0.5) * 80;
+      starPos[ix + 1] = (Math.random() - 0.5) * 40;
+      starPos[ix + 2] = -Math.random() * 160;
+    }
+
+    starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+    const starMat = new THREE.PointsMaterial({
+      size: 0.06,
+      color: 0xd9f3ff,
+      transparent: true,
+      opacity: 0.95
+    });
+    const stars = new THREE.Points(starGeo, starMat);
+    scene.add(stars);
+
+    // -------------------------
+    // 1.5) Obstáculos con colisión (POCOS)
+    // -------------------------
+    const OBSTACLE_COUNT = 18;
+    const OBSTACLE_Z_MIN = -90;
+    const OBSTACLE_Z_MAX = -18;
+
+    const obstacles = [];
+    const obsGeo = new THREE.SphereGeometry(0.22, 12, 12);
+    const obsMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x3355ff,
+      emissiveIntensity: 0.7,
+      roughness: 0.25,
+      metalness: 0.1
+    });
+
+    function rand(a,b){ return a + Math.random()*(b-a); }
+
+    function respawnObstacle(o){
+      o.position.x = rand(-5.2, 5.2);
+      o.position.y = rand(0.15, 2.9);
+      o.position.z = rand(OBSTACLE_Z_MIN, OBSTACLE_Z_MAX);
+    }
+
+    for(let i=0;i<OBSTACLE_COUNT;i++){
+      const o = new THREE.Mesh(obsGeo, obsMat);
+      respawnObstacle(o);
+      obstacles.push(o);
+      scene.add(o);
+    }
+
+    // -------------------------
+    // 2) MEDIAPIPE: FaceLandmarker
+    // -------------------------
+    let faceLandmarker = null;
+    const webcam = document.getElementById("webcam");
+    let lastVideoTime = -1;
+
+    // Índices EAR (párpados)
+    const L = { p1:33,  p4:133, p2:160, p3:158, p5:153, p6:144 };
+    const R = { p1:362, p4:263, p2:385, p3:387, p5:373, p6:380 };
+
+    function dist2D(a, b){
+      const dx = a.x - b.x, dy = a.y - b.y;
+      return Math.hypot(dx, dy);
+    }
+
+    // EAR = (|p2-p6| + |p3-p5|) / (2|p1-p4|)
+    function ear(landmarks, eye){
+      const p1 = landmarks[eye.p1], p4 = landmarks[eye.p4];
+      const p2 = landmarks[eye.p2], p6 = landmarks[eye.p6];
+      const p3 = landmarks[eye.p3], p5 = landmarks[eye.p5];
+      const A = dist2D(p2, p6);
+      const B = dist2D(p3, p5);
+      const C = dist2D(p1, p4);
+      return (A + B) / (2 * C);
+    }
+
+    // Neutral/relajada (simple)
+    function isNeutralFace(landmarks){
+      const topLip = landmarks[13];
+      const botLip = landmarks[14];
+      const mouthOpen = Math.abs(topLip.y - botLip.y);
+
+      const leftCorner = landmarks[61];
+      const rightCorner = landmarks[291];
+      const mouthWidth = Math.abs(leftCorner.x - rightCorner.x);
+
+      const neutralMouthClosed = mouthOpen < 0.020;
+      const neutralNotHugeSmile = mouthWidth < 0.46;
+
+      return neutralMouthClosed && neutralNotHugeSmile;
+    }
+
+    async function setupIA(){
+      uiStatus.textContent = "Cargando modelo IA…";
+      const resolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+      );
+
+      faceLandmarker = await FaceLandmarker.createFromOptions(resolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1
+      });
+
+      uiStatus.textContent = "IA lista. Enciende cámara…";
+    }
+
+    async function startWebcam(){
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      webcam.srcObject = stream;
+      await new Promise(res => webcam.addEventListener("loadeddata", res, { once: true }));
+
+      uiStatus.textContent = "IA Online — gira cabeza / cierra ojos para TURBO";
+      uiMode.textContent = "Normal";
+    }
+
+    // -------------------------
+    // 3) Movimiento: flotar + avance + colisión
+    // -------------------------
+    const clock = new THREE.Clock();
+
+    let targetX = 0;
+
+    // MÁS LENTO (base)
+    let speed = 0.18;
+    let targetSpeed = 0.18;
+
+    let isGameOver = false;
+    let animationStarted = false;
+
+    function setGameOver(){
+      if(isGameOver) return;
+      isGameOver = true;
+
+      uiStatus.textContent = "💥 Perdiste: chocaste con un obstáculo";
+      uiMode.textContent = "GAME OVER";
+      btnRestart.style.display = "inline-block"; // <<<<< aparece SOLO al perder
+    }
+
+    function resetGame(){
+      isGameOver = false;
+      btnRestart.style.display = "none";
+
+      targetX = 0;
+      speed = 0.18;
+      targetSpeed = 0.18;
+
+      car.position.set(0, 0.9, 0);
+      car.rotation.set(0, 0, 0);
+
+      for(const o of obstacles) respawnObstacle(o);
+
+      uiStatus.textContent = "Listo ✅ (IA sigue activa)";
+      uiMode.textContent = "Normal";
+      uiTurn.textContent = "0.00";
+      uiEyes.textContent = "—";
+      uiNeutral.textContent = "—";
+      uiSpeed.textContent = speed.toFixed(2);
+    }
+
+    // Botón reinicio (solo visible tras perder)
+    btnRestart.addEventListener("click", resetGame);
+
+    function updateStarsForward(dt, currentSpeed){
+      const SPEED_VISUAL = 18;
+      const pos = stars.geometry.attributes.position.array;
+
+      for (let i = 0; i < STAR_COUNT; i++) {
+        const iz = i * 3 + 2;
+        pos[iz] += currentSpeed * dt * SPEED_VISUAL;
+        if (pos[iz] > 2) pos[iz] = -160;
+      }
+      stars.geometry.attributes.position.needsUpdate = true;
+    }
+
+    function updateObstacles(dt, currentSpeed){
+      const OBSTACLE_VISUAL = 26;
+      for(const o of obstacles){
+        o.position.z += currentSpeed * dt * OBSTACLE_VISUAL;
+
+        if(o.position.z > 4){
+          respawnObstacle(o);
+          o.position.z = rand(OBSTACLE_Z_MIN, OBSTACLE_Z_MAX);
+        }
+
+        // Colisión simple
+        const dx = o.position.x - car.position.x;
+        const dy = o.position.y - car.position.y;
+        const dz = o.position.z - car.position.z;
+        const d = Math.hypot(dx, dy, dz);
+
+        if(d < 0.65){
+          setGameOver();
+          break;
+        }
+      }
+    }
+
+    function animate(){
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.05);
+      const t = clock.elapsedTime;
+
+      // --- IA por frame de video ---
+      if (!isGameOver && faceLandmarker && webcam.readyState >= 2 && webcam.currentTime !== lastVideoTime) {
+        lastVideoTime = webcam.currentTime;
+        const nowMs = performance.now();
+        const res = faceLandmarker.detectForVideo(webcam, nowMs);
+
+        if (res.faceLandmarks && res.faceLandmarks.length > 0) {
+          const lm = res.faceLandmarks[0];
+
+          // Giro por cabeza (nariz x)
+          const nose = lm[4];
+          const turn = THREE.MathUtils.clamp((nose.x - 0.5) * -6, -2.5, 2.5);
+          targetX = turn;
+          uiTurn.textContent = turn.toFixed(2);
+
+          // Ojos cerrados (EAR)
+          const earL = ear(lm, L);
+          const earR = ear(lm, R);
+          const earAvg = (earL + earR) / 2;
+
+          const eyesClosed = earAvg < 0.19;
+          const neutral = isNeutralFace(lm);
+
+          uiEyes.textContent = eyesClosed ? "Sí" : "No";
+          uiNeutral.textContent = neutral ? "Sí" : "No";
+
+          // ----- 3 MODOS (LENTOS) -----
+          if (eyesClosed) {
+            targetSpeed = 0.95;
+            uiMode.textContent = "TURBO (ojos cerrados)";
+
+            car.material.color.setHex(0xff7bd1);
+            car.material.emissive.setHex(0xff2fb2);
+            car.material.emissiveIntensity = 0.85;
+
+          } else if (neutral) {
+            targetSpeed = 0.55;
+            uiMode.textContent = "Boost (neutral)";
+
+            car.material.color.setHex(0xc7f0ff);
+            car.material.emissive.setHex(0xb7b3ff);
+            car.material.emissiveIntensity = 0.55;
+
+          } else {
+            targetSpeed = 0.18;
+            uiMode.textContent = "Normal";
+
+            car.material.color.setHex(0xaee7ff);
+            car.material.emissive.setHex(0x6bd6ff);
+            car.material.emissiveIntensity = 0.35;
+          }
+        }
+      }
+
+      // Si perdiste: congela (render nada más)
+      if(isGameOver){
+        renderer.render(scene, camera);
+        return;
+      }
+
+      // --- Suavizados ---
+      car.position.x = THREE.MathUtils.lerp(car.position.x, targetX, 0.07);
+      speed = THREE.MathUtils.lerp(speed, targetSpeed, 0.06);
+      uiSpeed.textContent = speed.toFixed(2);
+
+      // Flotación suave
+      car.position.y = 0.9 + Math.sin(t * 1.4) * 0.08;
+      car.rotation.z = Math.sin(t * 1.2) * 0.03;
+      car.rotation.x = THREE.MathUtils.lerp(
+        car.rotation.x,
+        speed > 0.75 ? -0.10 : (speed > 0.35 ? -0.06 : 0.02),
+        0.08
+      );
+
+      // Cámara sigue
+      camera.position.x = THREE.MathUtils.lerp(camera.position.x, car.position.x * 0.25, 0.04);
+      camera.lookAt(guide.position.x + car.position.x * 0.15, 0.8, 0);
+
+      // Avance en espacio
+      updateStarsForward(dt, speed);
+      updateObstacles(dt, speed);
+
+      renderer.render(scene, camera);
+    }
+
+    // Botón: iniciar IA + cámara
+    btnStart.addEventListener("click", async () => {
+      btnStart.disabled = true;
+      try {
+        await setupIA();
+        await startWebcam();
+
+        if(!animationStarted){
+          animationStarted = true;
+          animate();
+        }
+
+        uiStatus.textContent = "IA Online — gira cabeza / cierra ojos para TURBO";
+      } catch (e) {
+        uiStatus.textContent = "Error: no se pudo iniciar cámara/IA.";
+        uiMode.textContent = "—";
+        btnStart.disabled = false;
+        console.error(e);
+      }
+    });
+
+    // Resize
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    });
+  </script>
+</body>
+</html>
